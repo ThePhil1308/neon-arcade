@@ -13856,6 +13856,7 @@ if(typeof NeonArcade!=="undefined" && NeonArcade.register) NeonArcade.register(D
   #ns .item[aria-pressed="true"] { border-color: var(--rc); box-shadow: inset 0 0 0 1px var(--rc), 0 0 16px rgba(255,255,255,.08); }
   #ns .item.equipped::after { content: "AN"; position: absolute; top: 12px; right: 12px; font: 700 10px var(--ui); background: var(--lime); color: #0b0d1c; border-radius: 6px; padding: 2px 6px; }
   #ns .item.locked canvas { filter: grayscale(.75) brightness(.55); }
+  #ns .item.locked canvas.pt { filter: grayscale(.3) brightness(.84); }
   #ns .lk-right { position: relative; display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 10px; min-height: 0;
     padding: calc(16px + var(--sat)) calc(18px + var(--sar)) calc(16px + var(--sab)) 18px; }
   #ns .lk-info { justify-self: center; width: min(470px, 100%); background: rgba(11,13,28,.88); border: 1px solid var(--line2); border-radius: 14px; padding: 14px 16px; display: grid; gap: 8px; }
@@ -16581,6 +16582,22 @@ function nkRoof(P, x0, z0, x1, z1, y, rise, color, o = {}) {
     P.ramp(x0 - ov, z0 - ov, xm, z1 + ov, y, y + rise, '+x', color, ro);
     P.ramp(xm, z0 - ov, x1 + ov, z1 + ov, y, y + rise, '-x', color, ro);
   }
+  // Schneedecke (Nacharbeit 30.09.2026, nur Grafik): je Dachseite ein eigener Keil knapp über dem Holz, an der Traufe 14 cm weiter
+  // hinaus, 14–26 cm dick. Von unten sieht man so an Traufe und Giebelkanten einen weißen Schneerand (vorher nur die Holz-Unterseite,
+  // der Schnee lag unsichtbar oben). nkSnowCaps(M) verschiebt die Keile am Kartenende in die Deko – die Kollision bleibt das Holzdach.
+  if (o.top && o.snowCap !== false) {
+    const e = 0.14, g = 0.03, so = { tex: o.top, bottom: y + 0.02, nav: false }, c = o.topCol ?? color, lo = y + 0.2, hi = y + rise + 0.14;
+    const caps = x1 - x0 >= z1 - z0
+      ? [P.ramp(x0 - ov + g, z0 - ov - e, x1 + ov - g, (z0 + z1) / 2, lo, hi, '+z', c, so), P.ramp(x0 - ov + g, (z0 + z1) / 2, x1 + ov - g, z1 + ov + e, lo, hi, '-z', c, so)]
+      : [P.ramp(x0 - ov - e, z0 - ov + g, (x0 + x1) / 2, z1 + ov - g, lo, hi, '+x', c, so), P.ramp((x0 + x1) / 2, z0 - ov + g, x1 + ov + e, z1 + ov - g, lo, hi, '-x', c, so)];
+    for (const s of caps) s.snowCap = true;
+  }
+}
+// Schneedecken der Dächer (nkRoof) aus den Kollisionskörpern in die Deko verschieben (am Ende des Kartenaufbaus aufrufen)
+function nkSnowCaps(M) {
+  const caps = M.solids.filter((s) => s.snowCap);
+  for (const s of caps) M.solids.splice(M.solids.indexOf(s), 1);
+  M.decos.push(...caps);
 }
 // Wasserfläche (nur Grafik, keine Kollision): Wasser mit Wellen des Look-Baukastens (M.water → map.waters), sonst flache
 // Deko mit .water = true. Die Minimap malt beides blau.
@@ -17096,6 +17113,7 @@ function buildSummit() {
     P.spawn(46, 0, 18, 'a'); P.spawn(-52, 3, 16, 'a'); P.spawn(-30, 0, 38, 'a'); P.spawn(34, 0, 20, 'a'); P.spawn(52, 6, 40, 'a');
   });
   for (const [x0, z0, x1, z1] of [[-58, 44, 58, 58], [-56, 6, -42, 40], [44, 34, 56, 54]]) for (const sg of [1, -1]) nkGrass(M, sg * x0, sg * z0, sg * x1, sg * z1, { density: 3, flowers: 0, cell: 'dry' });
+  nkSnowCaps(M);   // Schneedecken der Dächer nur als Grafik (Nacharbeit 30.09.)
   return M.finish();
 }
 
@@ -20875,6 +20893,9 @@ function buildMapScene(map, thumb = false) {
   makeDecorTextures();   // einmalig: Decal- und Pflanzen-Atlas samt Materialien (52-decor.js)
   patchMapMaterials();   // einmalig: Kartenmaterialien bekommen Sonnenschatten und Schmutz pro Pixel
   let grp = thumb ? null : MAP_GFX_CACHE.get(map.id);
+  // zuletzt benutzt nach hinten (Nacharbeit 30.09.): verdrängt wird die am längsten nicht benutzte Karte, nicht die zuerst gebackene
+  // (sonst flog z. B. die Menü-Karte nach zwei Runden raus und wurde beim Zurück ins Menü neu gebacken)
+  if (grp) { MAP_GFX_CACHE.delete(map.id); MAP_GFX_CACHE.set(map.id, grp); }
   if (!grp) {
     const t0 = performance.now();
     grp = new THREE.Group();
@@ -22443,17 +22464,44 @@ function makePlayerView(g, p) {
   const muzzle = new THREE.Object3D(); ch.gun.add(muzzle);
   return { root, ch, tag, muzzle, phase: 0, crouch: 0, tilt: 0, flash: 0, shade: 1, shadeT: Math.random() * 0.3, wid: '' };
 }
+// eine Figur freigeben: Materialien, BEIDE Geometrien (nah + fern/LOD), Knochen-Textur, Namensschild (auch für gegangene Online-Spieler, 87-online.js)
+function disposePlayerView(v) {
+  R.scene.remove(v.root);
+  v.ch.mats.forEach((m) => m.dispose()); for (const gg of v.ch.geos || [v.ch.mesh.geometry]) gg.dispose();
+  if (v.ch.mesh.skeleton) v.ch.mesh.skeleton.dispose(); // Knochen-Textur
+  v.tag.material.map.dispose(); v.tag.material.dispose();
+}
 function clearPlayerViews() {
   clearAnims(); // besiegte Figuren, Blut, Sprechblasen (55-anim.js) geben die Geometrien frei
-  for (const v of R.playerViews.values()) {
-    R.scene.remove(v.root);
-    v.ch.mats.forEach((m) => m.dispose()); for (const gg of v.ch.geos || [v.ch.mesh.geometry]) gg.dispose();
-    if (v.ch.mesh.skeleton) v.ch.mesh.skeleton.dispose(); // Knochen-Textur
-    v.tag.material.map.dispose(); v.tag.material.dispose();
-  }
+  for (const v of R.playerViews.values()) disposePlayerView(v);
   R.playerViews.clear();
   for (const m of R.projViews.values()) projMeshPut(m);   // Projektil-Pool (54-fx.js)
   R.projViews.clear();
+  releaseSkinGpu();
+}
+// Nacharbeit 30.09.2026 (Speicher beim Kartenwechsel): Anzug-/Kleidungs-Muster (R.suitTex), Waffen-Skin-Muster (R.pattern), Figuren-Waffen
+// (GUN_GEO_CACHE) und bewegte Skin-Teile (WSK_PART_GEO) bleiben als Canvas/Geometrie im Zwischenspeicher (begrenzt: je Skin bzw. Waffe einmal,
+// Zeichnen kostet Zeit). Ihre KOPIE AUF DER GRAFIKKARTE wird aber bei jedem Figuren-Wechsel (Rundenstart, Menü, Online-Kartenwechsel alle 10 min)
+// freigegeben, wenn gerade nichts sie zeigt – sonst sammeln sich über viele Runden mit zufälligen Bots/Spielern bis zu ~70 Muster (≈ 24 MB) an.
+// Three.js lädt ein freigegebenes Objekt beim nächsten Zeichnen einfach neu hoch (256²-Muster: ~1 ms, passiert hinter „KARTE WIRD GEBAUT“).
+function releaseSkinGpu() {
+  const used = new Set();
+  const note = (o) => {
+    if (o.geometry) used.add(o.geometry);
+    for (const m of [].concat(o.material || [])) {
+      for (const k in m) { const t = m[k]; if (t && t.isTexture) used.add(t); }
+      if (m.uniforms) for (const k in m.uniforms) { const t = m.uniforms[k] && m.uniforms[k].value; if (t && t.isTexture) used.add(t); }
+    }
+  };
+  for (const S of [R.scene, R.vmScene, R.pvScene]) if (S) S.traverse(note);
+  let n = 0;
+  const free = (x) => { if (x && !used.has(x)) { x.dispose(); n++; } };
+  // nur schon gezeichnete Muster (Wert-Eigenschaften), die Getter noch nicht gezeichneter Muster (56-wskins-muster.js) nicht anfassen
+  if (R.pattern) for (const d of Object.values(Object.getOwnPropertyDescriptors(R.pattern))) if (d.value && d.value.isTexture) free(d.value);
+  for (const t of Object.values(R.suitTex || {})) free(t);
+  if (typeof GUN_GEO_CACHE !== 'undefined') for (const gg of GUN_GEO_CACHE.values()) free(gg);
+  if (typeof WSK_PART_GEO !== 'undefined') for (const P of WSK_PART_GEO.values()) free(P.geo);
+  return n;
 }
 function viewOf(p) { return R.playerViews.get(p.id); }
 function updatePlayerViews(g, alpha, dt) {
@@ -22523,9 +22571,20 @@ function updatePlayerViews(g, alpha, dt) {
 
 // ---------------------------------------------------------------- Vorschau-Figur (Menü, Spind)
 // Die Figur wird in einen Bildschirmbereich (DOM-Element) gezeichnet; Ziehen dreht sie.
+// Alte Vorschau erst NACH dem nächsten Bild der neuen freigeben (Nacharbeit 30.09.2026): sonst sinkt die Nutzung der gemeinsamen
+// Shader-Programme (Randlicht-Figur rim-s/rim-p, Podest) auf 0, Three.js löscht sie und übersetzt sie für die neue Figur sofort neu –
+// im Spind 5 Programme je Klick (auf dem iPad ein Ruckler pro Kachel). Höchstens 3 warten, die älteste wird dann sofort freigegeben.
+function pvTrash(fn) {
+  if (!fn) return;
+  const T = R.pvTrash || (R.pvTrash = []);
+  T.push(fn);
+  if (T.length > 3) T.shift()();
+}
 function setPreview(el, opts = {}) {
   if (!R.ready) return;
-  if (!el) { if (R.preview && R.preview.obj) R.pvScene.remove(R.preview.obj); R.preview = null; return; }
+  // Nacharbeit 30.09.: beim Rundenstart auch freigeben (vorher blieb die Menü-Figur samt Geometrien, Materialien, Knochen-Textur und
+  // Podest bei jedem Menü → Runde → Menü auf der Grafikkarte liegen)
+  if (!el) { if (R.preview && R.preview.obj) { R.pvScene.remove(R.preview.obj); pvTrash(R.preview.dispose); } R.preview = null; return; }
   const wsk = opts.wskin || weaponSkinFor(opts.weapon || 'ar');   // Waffen-Skin (opts.wskin = Probe im Spind/Shop)
   // opts.focus: 'body' | 'head' (Kopf-Skins/Visier, Kamera nah am Kopf) | 'back' (Rückenteile, Figur zeigt den Rücken), 59-chars.js
   const focus = opts.mode === 'weapon' ? 'weapon' : (CH_FOCUS[opts.focus] ? opts.focus : 'body');
@@ -22533,7 +22592,7 @@ function setPreview(el, opts = {}) {
   if (R.preview && R.preview.el === el && R.preview.key === key) return;
   const prev = R.preview && R.preview.el === el ? R.preview : null;
   const rot = prev && prev.focus === focus ? prev.rot : focus === 'weapon' ? (prev ? prev.rot : -0.5) : CH_FOCUS[focus].rot;
-  if (R.preview && R.preview.obj) { R.pvScene.remove(R.preview.obj); R.preview.dispose && R.preview.dispose(); }
+  if (R.preview && R.preview.obj) { R.pvScene.remove(R.preview.obj); pvTrash(R.preview.dispose); }
   let obj, dispose, ws = null, top = 2.1;
   if (opts.mode === 'weapon') {
     const vm = buildViewmodel(opts.weapon || 'ar', wsk, Settings.color);
@@ -22563,7 +22622,7 @@ function setPreview(el, opts = {}) {
   }
   R.pvScene.add(obj);
   R.preview = { el, key, obj, dispose, rot, spin: opts.spin ?? true, mode: opts.mode || 'char', drag: false, ws, emote: opts.emote || null, emoteT0: R.time,
-    focus, top, cam: prev && prev.mode === (opts.mode || 'char') ? prev.cam : null, t0: R.time };
+    focus, top, cam: prev && prev.mode === (opts.mode || 'char') ? prev.cam : null, t0: R.time, sw: prev && prev.focus === focus ? prev.sw : 0 };
   if (!el.dataset.dragBound) {
     el.dataset.dragBound = '1';
     let lx = 0;
@@ -22582,8 +22641,10 @@ function renderPreview() {
   for (let n = P.el; n; n = n.parentElement) if (n.hidden) { hidden = true; break; }
   if (hidden) return;
   const pdt = clamp(R.time - (P.lastT ?? R.time), 0, 0.1); P.lastT = R.time;
-  if (P.spin && !P.drag) P.rot += (P.mode === 'weapon' ? 0.004 : (CH_FOCUS[P.focus] || CH_FOCUS.body).spin) * 60 * pdt;   // je Sekunde statt je Bild: das Menü zeichnet ohne Eingabe mit 30 Bildern/s (86-leistung.js)
-  P.obj.rotation.y = P.rot;
+  const PF = P.mode === 'weapon' ? null : CH_FOCUS[P.focus] || CH_FOCUS.body, sway = PF && PF.sway && P.spin ? PF.sway : 0;
+  if (sway) { if (!P.drag) P.sw = (P.sw || 0) + pdt; }   // Charakter/Kopf/Rücken: sanft wiegen, Gesicht bzw. Rücken bleiben sichtbar (59-chars.js CH_FOCUS)
+  else if (P.spin && !P.drag) P.rot += (P.mode === 'weapon' ? 0.004 : PF.spin) * 60 * pdt;   // je Sekunde statt je Bild: das Menü zeichnet ohne Eingabe mit 30 Bildern/s (86-leistung.js)
+  P.obj.rotation.y = P.rot + (sway ? Math.sin((P.sw || 0) * PF.swayF) * sway : 0);
   const ch = P.obj.userData.ch;
   if (ch) {
     // opts.emote: Figur zeigt das Emote in Schleife (Spind), sonst leichtes Atmen
@@ -22612,6 +22673,7 @@ function renderPreview() {
   rr.setScissor(fr.left, innerHeight - fb, fr.width, fr.height);
   rr.clearDepth();
   rr.render(R.pvScene, cam);
+  if (R.pvTrash && R.pvTrash.length) for (const f of R.pvTrash.splice(0)) f();   // Programme sind jetzt von der neuen Figur belegt
   rr.setScissorTest(false);
   rr.setViewport(0, 0, innerWidth, innerHeight);
 }
@@ -23560,7 +23622,9 @@ function initAnim() {
   S.shadows = makeFadeDecals(ANIM_CFG.bodies, R.tex.blob, -2, 0);
   S.mist = makePoints(140, 0.3, THREE.NormalBlending, true, 'puff');
   for (let i = 0; i < 6; i++) {
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true, depthWrite: false, opacity: 0 }));
+    // gleich mit Bild anlegen (Nacharbeit 30.09.): sonst übersetzt das Vorwärmen ein eigenes Sprite-Programm ohne Bild, das nie gebraucht
+    // wird – mit Bild teilen sich Sprechblasen und Namensschilder ein Programm
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: R.tex.blob, transparent: true, depthWrite: false, opacity: 0 }));
     sp.visible = false; sp.renderOrder = 6; sp.scale.set(0.8, 0.8, 1); R.scene.add(sp);
     S.bubbles.push({ sp, pid: -1, id: '', a: 0 });
   }
@@ -29160,11 +29224,13 @@ function chMaterials(suit, rimHex, skin) {
 
 // ---------------------------------------------------------------- Vorschau (Menü, Spind, Drops): Kamera-Rahmen und Podest
 // focus: 'body' (ganze Figur), 'head' (Kopf-Skins und Visier: Kamera nah am Kopf), 'back' (Rückenteile: Figur zeigt den Rücken)
+// sway (Nacharbeit 30.09.2026): statt ganz herumzudrehen wiegt sich die Figur um die Startansicht (± sway rad, Periode 2π/swayF s),
+// damit Gesicht bzw. Rücken immer zu sehen sind (vorher stand sie nach ein paar Sekunden im Profil). Ziehen dreht weiterhin frei.
 const CH_FOCUS = {
   body: { y0: -0.12, w: 1.3, m: 1.1, rot: Math.PI + 0.45, spin: 0.004 },
-  head: { y0: 1.3, w: 0.62, m: 1.15, rot: Math.PI + 0.3, spin: 0.002 },
-  char: { y0: 0.84, w: 0.9, m: 1.06, rot: Math.PI + 0.38, spin: 0.0024 },   // Charakter und Kleidung: Oberkörper, Gesicht gut sichtbar
-  back: { y0: 0.45, w: 1.7, m: 1.12, rot: 0.5, spin: 0.0022 },
+  head: { y0: 1.3, w: 0.62, m: 1.15, rot: Math.PI + 0.22, spin: 0.002, sway: 0.42, swayF: 0.5 },
+  char: { y0: 0.84, w: 0.9, m: 1.06, rot: Math.PI + 0.24, spin: 0.0024, sway: 0.4, swayF: 0.5 },   // Charakter und Kleidung: Oberkörper, Gesicht gut sichtbar
+  back: { y0: 0.45, w: 1.7, m: 1.12, rot: 0.35, spin: 0.0022, sway: 0.38, swayF: 0.45 },
 };
 // freier Teil des Vorschau-Felds: Geschwister-Elemente, die es überdecken (z. B. Namensleiste auf dem Handy quer, Info-Kasten im Spind), abziehen
 function chFreeRect(el) {
@@ -30546,6 +30612,12 @@ function mnDrawPortrait(g, W, H, L, opt = {}) {
   g.save(); g.translate(cx, top); g.scale(s, s);
   const skin = mnHex(L.skin), hair = mnHex(L.hairCol), T = mnTop(L), f = L.sex === 'f', hs = L.hair;
   const ell = (x, y, rx, ry, c) => { g.fillStyle = c; g.beginPath(); g.ellipse(x, y, rx, ry, 0, 0, 7); g.fill(); };
+  // Nacharbeit 30.09.2026: besser ausgeleuchtet – weiches Licht hinter dem Kopf (die Kacheln sind dunkel), Licht von oben links
+  // auf Gesicht und Schultern (dunkle Haut, schwarze Anzüge und graue Haare wirkten vorher flach und düster)
+  const halo = g.createRadialGradient(0, 42, 6, 0, 52, 80);
+  halo.addColorStop(0, 'rgba(255,244,228,.30)'); halo.addColorStop(0.55, 'rgba(186,212,255,.12)'); halo.addColorStop(1, 'rgba(186,212,255,0)');
+  g.fillStyle = halo; g.fillRect(-80, -12, 160, 140);
+  const keyLight = (x0, y0, r, a) => { g.save(); g.clip(); const k = g.createRadialGradient(x0, y0, 2, x0 + 3, y0 + 8, r); k.addColorStop(0, `rgba(255,248,236,${a})`); k.addColorStop(1, 'rgba(255,248,236,0)'); g.fillStyle = k; g.fillRect(-80, -12, 160, 140); g.restore(); };
   // lange Haare hinter dem Kopf
   if (hs === 'long' || hs === 'bob' || hs === 'wavy') { g.fillStyle = mnShadeHex(L.hairCol, 0.8); g.beginPath(); const lo = hs === 'long' ? 104 : hs === 'bob' ? 76 : 70; g.moveTo(-27, 44); g.quadraticCurveTo(-30, lo - 10, -26, lo); g.lineTo(26, lo); g.quadraticCurveTo(30, lo - 10, 27, 44); g.closePath(); g.fill(); }
   if (hs === 'afro') ell(0, 36, 36, 32, hair);
@@ -30554,6 +30626,7 @@ function mnDrawPortrait(g, W, H, L, opt = {}) {
   const topC = opt.topCol != null ? opt.topCol : L.topCol;
   g.fillStyle = mnHex(topC); g.beginPath(); g.moveTo(-62, 124); g.quadraticCurveTo(-60, 88, -24, 84); g.lineTo(24, 84); g.quadraticCurveTo(60, 88, 62, 124); g.closePath(); g.fill();
   if (opt.pattern) { g.save(); g.clip(); g.globalAlpha = 0.9; g.drawImage(opt.pattern, 0, 0, 120, 120, -62, 80, 124, 124); g.globalAlpha = 1; g.restore(); }
+  keyLight(-30, 84, 64, 0.2);   // Schultern (Pfad des Oberteils ist noch aktiv)
   if (L.vest) { g.fillStyle = mnHex(L.vestCol); g.fillRect(-30, 92, 60, 32); }
   if (T.open && L.inner) { g.fillStyle = mnHex(L.inner); g.beginPath(); g.moveTo(-9, 84); g.lineTo(9, 84); g.lineTo(T.open === 'suit' ? 2 : 7, 124); g.lineTo(T.open === 'suit' ? -2 : -7, 124); g.closePath(); g.fill(); }
   if (T.open === 'suit') { g.fillStyle = mnHex(L.tie || 0x1a1c22); g.beginPath(); g.moveTo(-3, 86); g.lineTo(3, 86); g.lineTo(5, 118); g.lineTo(0, 124); g.lineTo(-5, 118); g.closePath(); g.fill(); }
@@ -30565,6 +30638,7 @@ function mnDrawPortrait(g, W, H, L, opt = {}) {
   g.fillStyle = mnShadeHex(L.skin, 0.88); g.fillRect(-11, 62, 22, 24);
   ell(-24, 44, 5, 8, mnShadeHex(L.skin, 0.95)); ell(24, 44, 5, 8, mnShadeHex(L.skin, 0.95));
   g.fillStyle = skin; g.beginPath(); g.moveTo(-23, 28); g.quadraticCurveTo(-24, 58, -11, 70); g.quadraticCurveTo(0, 78, 11, 70); g.quadraticCurveTo(24, 58, 23, 28); g.quadraticCurveTo(22, 4, 0, 4); g.quadraticCurveTo(-22, 4, -23, 28); g.fill();
+  keyLight(-9, 26, 38, 0.26);   // Gesicht
   // Bart
   const bc = mnHex(L.beardCol || L.hairCol);
   if (L.beard === 'full' || L.beard === 'short') { g.fillStyle = bc; g.globalAlpha = L.beard === 'short' ? 0.8 : 1; g.beginPath(); g.moveTo(-22, 44); g.quadraticCurveTo(-20, 66, -10, 72); g.quadraticCurveTo(0, L.beard === 'full' ? 82 : 78, 10, 72); g.quadraticCurveTo(20, 66, 22, 44); g.lineTo(16, 50); g.quadraticCurveTo(0, 54, -16, 50); g.closePath(); g.fill(); g.globalAlpha = 1; }
@@ -32582,6 +32656,7 @@ function lockerShow(cat) {
     b.classList.toggle('equipped', isEquipped(cat, it));
     b.classList.toggle('locked', (locked || !!it.drop) && !owned);
     const cv = document.createElement('canvas'); cv.width = 160; cv.height = 120;
+    if (cat === 'char' || cat === 'suit' || cat === 'head') cv.className = 'pt';   // Porträt: gesperrt nur leicht gedämpft (00-head.html)
     drawItemIcon(cv, cat, it, cat === 'camo' ? lkPreviewWeapon() : undefined);
     b.append(cv);
     const state = isEquipped(cat, it) ? 'Ausgerüstet' : owned ? 'Im Besitz' : it.drop ? 'Drop · Shop' : locked ? `ab Level ${it.level}` : `<i class="chipico"></i> ${it.price}`;
@@ -34750,10 +34825,7 @@ class OnlineGame extends Game {
 function netDropView(p) {
   const v = R.playerViews && R.playerViews.get(p.id);
   if (!v) return;
-  R.scene.remove(v.root);
-  v.ch.mats.forEach((m) => m.dispose()); v.ch.mesh.geometry.dispose();
-  if (v.ch.mesh.skeleton) v.ch.mesh.skeleton.dispose();
-  v.tag.material.map.dispose(); v.tag.material.dispose();
+  disposePlayerView(v);   // Nacharbeit 30.09.: gibt jetzt auch die ferne LOD-Geometrie frei (vorher blieb sie auf der Grafikkarte)
   R.playerViews.delete(p.id);
 }
 function netGame() { return game && game.online ? game : null; }
