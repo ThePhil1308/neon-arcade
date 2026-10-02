@@ -5221,26 +5221,47 @@ const hpMax = l=>CFG.baseHp + (l-1)*CFG.hpPerLvl;
 /* ---------- reine Spiellogik ---------- */
 function makeHeli(w, name, color, isPlayer){
   const R = w.rand, W = CFG.world;
-  return {id: w.nextId++, name, color, player: !!isPlayer, x: 300+R()*(W-600), y: 300+R()*(W-600),
+  return {id: w.nextId++, name, color, player: !!isPlayer, human: !!isPlayer, x: 300+R()*(W-600), y: 300+R()*(W-600),
     vx:0, vy:0, ang: R()*6.28, lvl: 1, xp: 0, hp: CFG.baseHp, cd: 0, dead: false, score: 0, kills: 0,
     rotor: R()*6, wx: 0, wy: 0, wt: 0, strafe: R()<.5?-1:1, st: 0, hit: 0, respawn: 0, skill: .6+R()*.5};
 }
-function makeWorld(seed){
-  const w = {t:0, rand: rng(seed||1), nextId: 1, bullets: [], orbs: [], repairs: [], fx: [], heli: [], over: false, kills: 0, pops: []};
-  w.player = makeHeli(w, "Du", CFG.playerColor, true);
-  w.player.x = w.player.y = CFG.world/2;
-  w.heli.push(w.player);
-  const names = CFG.names.slice();
-  for(let i=0;i<CFG.bots;i++){
-    const n = names.splice(Math.floor(w.rand()*names.length),1)[0] || "Bot"+i;
-    const b = makeHeli(w, n, CFG.colors[i%CFG.colors.length], false);
-    // nicht direkt neben dem Spieler starten
-    while(Math.hypot(b.x-w.player.x, b.y-w.player.y) < 700){ b.x = 300+w.rand()*(CFG.world-600); b.y = 300+w.rand()*(CFG.world-600); }
-    w.heli.push(b);
+function makeWorld(seed, opts){
+  const w = {t:0, rand: rng(seed||1), nextId: 1, bullets: [], orbs: [], repairs: [], fx: [], heli: [], over: false, kills: 0, pops: [], online: !!(opts&&opts.online), player: null};
+  if(!w.online){
+    w.player = makeHeli(w, "Du", CFG.playerColor, true);
+    w.player.x = w.player.y = CFG.world/2;
+    w.heli.push(w.player);
+    for(let i=0;i<CFG.bots;i++) addBot(w);
   }
   for(let i=0;i<CFG.orbs;i++) w.orbs.push(newOrb(w));
   for(let i=0;i<CFG.repairs;i++) w.repairs.push(newOrb(w));
   return w;
+}
+function addBot(w){
+  const used = new Set(w.heli.map(h=>h.name));
+  const free = CFG.names.filter(n=>!used.has(n));
+  const n = free.length ? free[Math.floor(w.rand()*free.length)] : "Bot"+w.nextId;
+  const b = makeHeli(w, n, CFG.colors[w.nextId%CFG.colors.length], false);
+  let tries = 0;
+  while(tries++ < 20 && w.heli.some(h=>h.human && !h.dead && Math.hypot(b.x-h.x, b.y-h.y) < 700)){ b.x = 300+w.rand()*(CFG.world-600); b.y = 300+w.rand()*(CFG.world-600); }
+  b.lvl = refLvl(w); b.hp = hpMax(b.lvl);
+  w.heli.push(b); return b;
+}
+/* Online: Bots auffüllen, bis `total` Hubschrauber da sind; sobald mehr Menschen kommen, gehen Bots (schwächste zuerst) */
+function balance(w, total){
+  const humans = w.heli.filter(h=>h.human).length;
+  let bots = w.heli.filter(h=>!h.human);
+  const want = Math.max(0, total - humans);
+  while(bots.length < want) bots.push(addBot(w));
+  while(bots.length > want){
+    bots.sort((a,b)=>(a.dead?-1:0)-(b.dead?-1:0) || a.score-b.score);
+    const g = bots.shift(); w.heli.splice(w.heli.indexOf(g), 1);
+  }
+}
+function refLvl(w){
+  const hs = w.heli.filter(h=>h.human && !h.dead);
+  if(!hs.length) return 1;
+  return clamp(Math.round(hs.reduce((a,h)=>a+h.lvl,0)/hs.length) - 1, 1, CFG.maxLvl);
 }
 function newOrb(w, x, y, v){
   const W = CFG.world;
@@ -5277,9 +5298,9 @@ function kill(w, victim, killer){
   w.fx.push({x: victim.x, y: victim.y, t: 0, c: victim.color});
   if(killer && killer !== victim){
     killer.kills++; killer.score += CFG.killScore + victim.lvl*20; addXp(w, killer, 60 + victim.lvl*25);
-    if(killer.player) w.kills++;
+    if(killer.human) w.kills++;
   }
-  if(victim.player) w.over = true;
+  if(victim.player && !w.online) w.over = true;
 }
 function botThink(w, b, dt){
   const R = w.rand, W = CFG.world;
@@ -5335,27 +5356,36 @@ function moveHeli(h, ix, iy, dt){
   h.rotor += dt*(26 + Math.hypot(h.vx,h.vy)*.02);
 }
 /* input: {x,y: Bewegung (-1..1), aim: Winkel oder null, fire: bool} */
+function respawnHeli(w, b, lvl, human){
+  const nb = makeHeli(w, b.name, b.color, false);
+  nb.lvl = lvl; nb.hp = hpMax(lvl); nb.score = 0; nb.id = b.id; nb.human = human; nb.player = b.player;
+  for(let tries=0; tries<8 && w.heli.some(h=>h!==b && h.human && !h.dead && Math.hypot(nb.x-h.x, nb.y-h.y) < 600); tries++){ nb.x = 300+w.rand()*(CFG.world-600); nb.y = 300+w.rand()*(CFG.world-600); }
+  Object.assign(b, nb);
+}
+/* input: Einzelspieler {x,y,aim,fire} für w.player, online {byId:{<id>:{...}}} für alle Menschen */
 function step(w, input, dt){
   dt = Math.min(dt, 0.05);
   w.t += dt;
-  const P = w.player;
-  if(!w.over){
-    if(input.aim != null) P.ang += clamp(angDiff(P.ang, input.aim), -dt*14, dt*14);
-    moveHeli(P, input.x, input.y, dt);
+  const byId = input && input.byId;
+  for(const P of w.heli){
+    if(!P.human) continue;
+    if(P.dead){
+      if(!w.online) continue;
+      P.respawn -= dt; if(P.respawn <= 0) respawnHeli(w, P, 1, true);
+      continue;
+    }
+    if(w.over) continue;
+    const ip = (byId ? byId[P.id] : input) || {x:0, y:0, aim:null, fire:false};
+    if(ip.aim != null) P.ang += clamp(angDiff(P.ang, ip.aim), -dt*14, dt*14);
+    moveHeli(P, ip.x, ip.y, dt);
     P.cd -= dt;
-    if(input.fire && P.cd<=0) shoot(w, P);
+    if(ip.fire && P.cd<=0) shoot(w, P);
   }
   for(const b of w.heli){
-    if(b.player) continue;
+    if(b.human) continue;
     if(b.dead){
       b.respawn -= dt;
-      if(b.respawn <= 0){
-        // neu starten, kleine Stufe (Gummiband: etwa Spielerstufe minus 1)
-        const nb = makeHeli(w, b.name, b.color, false);
-        nb.lvl = clamp(P.lvl-1+Math.floor(w.rand()*3), 1, CFG.maxLvl); nb.hp = hpMax(nb.lvl); nb.score = 0; nb.id = b.id;
-        for(let tries=0; tries<8 && Math.hypot(nb.x-P.x, nb.y-P.y) < 600; tries++){ nb.x = 300+w.rand()*(CFG.world-600); nb.y = 300+w.rand()*(CFG.world-600); }
-        Object.assign(b, nb);
-      }
+      if(b.respawn <= 0) respawnHeli(w, b, clamp(refLvl(w)+Math.floor(w.rand()*3), 1, CFG.maxLvl), false);  // Gummiband
       continue;
     }
     b.cd -= dt;
@@ -5405,7 +5435,7 @@ function step(w, input, dt){
   // kleine Regeneration
   for(const h of w.heli) if(!h.dead && h.hp < hpMax(h.lvl)) h.hp = Math.min(hpMax(h.lvl), h.hp + dt*1.2);
 }
-const LOGIK = {CFG, makeWorld, step, shoot, hpMax};
+const LOGIK = {CFG, makeWorld, step, shoot, hpMax, balance, addXp};
 
 /* ---------- Zeichnen ---------- */
 function drawHeli(x, h, sc, t){
@@ -5513,15 +5543,75 @@ function thumb(cv){
   x.shadowBlur = 0; x.fillStyle = "#ffe066"; x.beginPath(); x.arc(250,140,7,0,6.3); x.fill();
 }
 
+/* ---------- Online-Einstellungen ---------- */
+// url: Cloudflare-Worker (copter-online/), ?copterserver=ws://127.0.0.1:8788 in der Seiten-Adresse überschreibt sie zum Testen
+const ONLINE = {
+  url: "wss://neon-copter-online.neon-strike-online.workers.dev",
+  proto: 1,
+  interp: 120,       // ms Verzögerung beim Interpolieren
+};
+function serverUrl(){
+  try{ const q = new URLSearchParams(location.search).get("copterserver"); if(/^wss?:\/\//.test(q||"")) return q.replace(/\/$/,""); }catch(e){}
+  return ONLINE.url;
+}
+
+/* ---------- Menü: Solo oder Online-Server ---------- */
+function start(ctx){
+  const stage = ctx.stage;
+  let cur = null, menu = null, dead = false;
+  function css(el, s){ el.style.cssText = s; return el; }
+  function btn(text, fn, extra){
+    const b = document.createElement("button"); b.textContent = text;
+    css(b, "font:600 15px Chakra Petch,sans-serif;color:#e8ecff;background:#1e2242;border:1px solid #3ee6ff;border-radius:10px;padding:10px 18px;cursor:pointer;"+(extra||""));
+    b.addEventListener("click", fn); return b;
+  }
+  function getName(){ try{ return localStorage.getItem("na_copter_name") || ""; }catch(e){ return ""; } }
+  function showMenu(){
+    if(dead) return;
+    if(menu) menu.remove();
+    menu = css(document.createElement("div"), "display:flex;flex-direction:column;align-items:center;justify-content:center;gap:12px;width:100%;height:100%;padding:16px;box-sizing:border-box;color:#e8ecff;font-family:Chakra Petch,sans-serif;overflow:auto");
+    const h = css(document.createElement("div"), "font:bold 22px 'Press Start 2P',monospace;color:#3ee6ff;text-shadow:0 0 14px #3ee6ff;margin-bottom:4px;text-align:center");
+    h.textContent = "NEON COPTER";
+    const name = css(document.createElement("input"), "font:600 15px Chakra Petch,sans-serif;color:#e8ecff;background:#0f1330;border:1px solid #3a3f78;border-radius:8px;padding:8px 12px;width:200px;text-align:center");
+    name.placeholder = "Dein Pilotenname"; name.maxLength = 16; name.value = getName();
+    const list = css(document.createElement("div"), "display:none;flex-direction:column;gap:8px;width:min(340px,100%)");
+    const msg = css(document.createElement("div"), "color:#9aa2d0;font-size:13px;min-height:18px;text-align:center");
+    const solo = btn("Solo gegen Bots", ()=>{ menu.remove(); menu = null; cur = playGame(ctx, null, ()=>{}); }, "width:220px");
+    const on = btn("Online-Server", ()=>{
+      list.style.display = "flex"; list.innerHTML = ""; msg.textContent = "Lade Server-Liste …";
+      const base = serverUrl(), http = base.replace(/^ws/, "http");
+      fetch(http+"/status", {cache:"no-store"}).then(r=>r.json()).then(j=>{
+        msg.textContent = "Freie Plätze füllen Bots auf.";
+        for(const s of j.server){
+          const row = btn(s.name+"  ·  "+s.spieler+"/"+s.max+" Piloten"+(s.bots?"  ·  "+s.bots+" Bots":""), ()=>{
+            let n = name.value.trim(); if(n.length<2) n = "Pilot"+(100+Math.floor(Math.random()*900));
+            try{ localStorage.setItem("na_copter_name", n); }catch(e){}
+            menu.remove(); menu = null;
+            cur = playGame(ctx, {url: base, id: s.id, name: n, label: s.name}, ()=>{ cur.stop(); cur = null; showMenu(); });
+          }, "text-align:left;width:100%");
+          list.appendChild(row);
+        }
+      }).catch(()=>{ msg.textContent = "Server nicht erreichbar. Versuche es später noch einmal oder spiele Solo."; list.style.display = "none"; });
+    }, "width:220px");
+    menu.append(h, name, solo, on, msg, list);
+    stage.appendChild(menu);
+  }
+  showMenu();
+  return {
+    stop(){ dead = true; if(cur) cur.stop(); if(menu) menu.remove(); cur = null; menu = null; },
+    restart(){ if(cur && cur.restart) cur.restart(); else showMenu(); },
+  };
+}
+
 /* ---------- Spiel starten ---------- */
-function start({stage, setScore, game, close}){
+function playGame({stage, setScore, game, close}, srv, toMenu){
   const cv = document.createElement("canvas");
   cv.style.cssText = "touch-action:none;display:block;border-radius:10px;background:#0a0f24;cursor:crosshair";
   stage.appendChild(cv);
   const hint = typeof makeHint==="function" ? makeHint("Maus: Hubschrauber folgt dem Zeiger · Klick/Leertaste = Schießen · WASD/Pfeile fliegen, Zielen automatisch · Touch: Finger ziehen = fliegen und automatisch schießen") : null;
   if(hint) stage.appendChild(hint);
   const x = cv.getContext("2d");
-  let w = makeWorld((Math.random()*1e9)|0), best = 0;
+  let w = srv ? makeNetWorld() : makeWorld((Math.random()*1e9)|0), best = 0, net = null;
   try{ best = HS.get("copter"); }catch(e){}
   let W = 0, H = 0, dpr = 1, raf = 0, last = 0, stopped = false, overT = 0;
   const keys = {}; let mouse = null, mdown = false, touch = null;
@@ -5538,6 +5628,7 @@ function start({stage, setScore, game, close}){
   function pos(e){ const r = cv.getBoundingClientRect(); return {x: (e.clientX-r.left)*(W/r.width), y: (e.clientY-r.top)*(H/r.height)}; }
   const onMove = e=>{ if(e.pointerType==="mouse") mouse = pos(e); else if(touch && e.pointerId===touch.id){ const p = pos(e); touch.x = p.x; touch.y = p.y; } };
   const onDown = e=>{
+    if(net && net.status!=="ok" && net.status!=="verbinden"){ toMenu(); return; }
     if(w.over){ if(overT > .6) restart(); return; }
     if(e.pointerType==="mouse"){ mouse = pos(e); mdown = true; }
     else if(!touch){ const p = pos(e); touch = {id:e.pointerId, sx:p.x, sy:p.y, x:p.x, y:p.y}; try{cv.setPointerCapture(e.pointerId);}catch(_){} }
@@ -5587,23 +5678,30 @@ function start({stage, setScore, game, close}){
     if(stopped) return;
     raf = requestAnimationFrame(frame);
     const dt = last ? (ts-last)/1000 : 0.016; last = ts;
-    const was = w.over;
-    step(w, readInput(), dt);
+    const was = w.over || !!(net && w.player && w.player.dead);
+    if(net) netUpdate(dt, performance.now()); else step(w, readInput(), dt);
     if(w.over){ overT += dt; }
     const P = w.player;
+    if(!P){ render(); return; }
     setScore(P.score);
-    if(!was && w.over){ try{ if(P.score > best){ best = P.score; HS.set("copter", best); } }catch(e){} }
+    const nowOver = w.over || (net && P.dead);
+    if(!was && nowOver){ try{ if(P.score > best){ best = P.score; HS.set("copter", best); } }catch(e){} }
     render();
   }
   function render(){
     const P = w.player, sc = Math.min(W,H)/CFG.view;
     x.setTransform(dpr,0,0,dpr,0,0);
+    if(!P){ x.fillStyle = "#05070f"; x.fillRect(0,0,W,H); statusText(net ? (net.status==="verbinden" ? "Verbinde mit "+srv.label+" …" : "Verbindung fehlgeschlagen") : ""); return; }
     x.fillStyle = "#05070f"; x.fillRect(0,0,W,H);
     const cx = clamp(P.x, W/2/sc - 100, CFG.world - W/2/sc + 100), cy = clamp(P.y, H/2/sc - 100, CFG.world - H/2/sc + 100);
     x.save(); x.translate(W/2, H/2); x.scale(sc, sc); x.translate(-cx, -cy);
     drawWorld(x, w, cx, cy, W/sc, H/sc, sc);
     x.restore();
     hud(sc);
+    if(net){
+      if(net.status==="getrennt" || net.status==="fehler") statusText(net.status==="fehler" ? "Server nicht erreichbar" : "Verbindung verloren", "Tippen für zurück zum Menü");
+      else if(P.dead) statusText("ABGESCHOSSEN", "Du startest gleich neu …", true);
+    }
     if(w.over){
       x.fillStyle = "rgba(6,7,18,.72)"; x.fillRect(0,0,W,H);
       x.textAlign = "center"; x.fillStyle = "#ff6b8a"; x.font = 'bold '+Math.round(Math.min(26,W/16))+'px "Press Start 2P",monospace';
@@ -5656,13 +5754,77 @@ function start({stage, setScore, game, close}){
       x.fillStyle = "rgba(255,255,255,.3)"; x.beginPath(); x.arc(touch.x, touch.y, 20, 0, 6.3); x.fill();
     }
   }
-  function restart(){ w = makeWorld((Math.random()*1e9)|0); overT = 0; setScore(0); }
+  function statusText(t1, t2, dim){
+    x.fillStyle = dim ? "rgba(6,7,18,.45)" : "rgba(6,7,18,.8)"; x.fillRect(0,0,W,H);
+    x.textAlign = "center"; x.fillStyle = "#ff6b8a"; x.font = 'bold '+Math.round(Math.min(22,W/18))+'px "Press Start 2P",monospace';
+    x.fillText(t1, W/2, H/2-8);
+    if(t2){ x.fillStyle = "#9aa2d0"; x.font = "15px Chakra Petch,sans-serif"; x.fillText(t2, W/2, H/2+24); }
+    x.textAlign = "start";
+  }
+
+  /* ---- Online: Schnappschüsse vom Server in eine zeichenbare Welt verwandeln ---- */
+  function makeNetWorld(){
+    return {t:0, heli:[], bullets:[], orbs:[], repairs:[], fx:[], pops:[], over:false, online:true, kills:0, player:null};
+  }
+  let sendT = 0, objs = new Map();
+  if(srv){
+    net = {ws:null, me:null, snaps:[], roster:new Map(), status:"verbinden"};
+    try{
+      const ws = new WebSocket(srv.url+"/ws?v="+ONLINE.proto+"&raum="+encodeURIComponent(srv.id));
+      net.ws = ws;
+      ws.onopen = ()=>ws.send(JSON.stringify({t:"join", name:srv.name}));
+      ws.onmessage = e=>{
+        let m; try{ m = JSON.parse(e.data); }catch(_){ return; }
+        if(m.t==="hallo"){ net.me = m.id; net.status = "ok"; }
+        else if(m.t==="roster"){ net.roster = new Map(m.l.map(r=>[r[0], {name:r[1], color:r[2], human:r[3]}])); }
+        else if(m.t==="s"){ m.at = performance.now(); net.snaps.push(m); if(net.snaps.length>12) net.snaps.shift(); for(const ev of m.e) w.fx.push({x:ev[1], y:ev[2], t:0, c:ev[3]}); }
+      };
+      ws.onclose = ()=>{ if(!stopped) net.status = net.status==="ok" ? "getrennt" : "fehler"; };
+      ws.onerror = ()=>{ if(!stopped && net.status!=="ok") net.status = "fehler"; };
+    }catch(err){ net.status = "fehler"; }
+  }
+  function netUpdate(dt, now){
+    w.t = now/1000;
+    for(let i=w.fx.length-1;i>=0;i--){ w.fx[i].t += dt; if(w.fx[i].t>.8) w.fx.splice(i,1); }
+    const sn = net.snaps;
+    if(net.ws && net.ws.readyState===1 && net.status==="ok" && now-sendT > 50){
+      sendT = now; const i = readInput();
+      net.ws.send(JSON.stringify({t:"i", x:+i.x.toFixed(2), y:+i.y.toFixed(2), aim:i.aim==null?null:+i.aim.toFixed(2), fire:i.fire}));
+    }
+    if(!sn.length) return;
+    const lastS = sn[sn.length-1], rt = now-ONLINE.interp;
+    let a = sn[0], b = sn[0];
+    for(let i=0;i<sn.length;i++){ if(sn[i].at<=rt){ a = sn[i]; b = sn[i+1] || sn[i]; } }
+    const k = a===b ? 1 : clamp((rt-a.at)/(b.at-a.at), 0, 1);
+    const ha = new Map(a.h.map(r=>[r[0], r])), age = Math.min(.12, (now-lastS.at)/1000);
+    const seen = new Set(), list = [];
+    for(const rb of (b===a ? lastS : b).h){
+      const id = rb[0], ra = ha.get(id) || rb, mine = id===net.me, info = net.roster.get(id) || {name:"?", color:"#ffffff"};
+      let o = objs.get(id);
+      if(!o){ o = {id, rotor: Math.random()*6, vx:0, vy:0}; objs.set(id, o); }
+      if(mine){ const rl = lastS.h.find(r=>r[0]===id) || rb; o.x = rl[1]+rl[8]*age; o.y = rl[2]+rl[9]*age; o.ang = rl[3]; }
+      else { o.x = ra[1]+(rb[1]-ra[1])*k; o.y = ra[2]+(rb[2]-ra[2])*k; o.ang = ra[3]+angDiff(ra[3], rb[3])*k; }
+      o.hp = rb[4]; o.lvl = rb[5]; o.dead = !!(rb[6]&1); o.hit = rb[6]&2 ? .1 : 0; o.score = rb[7]; o.vx = rb[8]; o.vy = rb[9];
+      o.xp = rb[10]||0; o.name = mine ? "Du" : info.name; o.color = mine ? CFG.playerColor : info.human ? "#ffd166" : info.color;
+      o.rotor += dt*(26+Math.hypot(o.vx,o.vy)*.02);
+      seen.add(id); list.push(o);
+      if(mine) w.player = o;
+    }
+    for(const id of objs.keys()) if(!seen.has(id)) objs.delete(id);
+    w.heli = list;
+    w.bullets = lastS.b.map(q=>({x:q[0]+q[2]*age, y:q[1]+q[3]*age, vx:q[2], vy:q[3], color:(objs.get(q[4])||{}).color||"#fff"}));
+    w.orbs = lastS.o.map((q,i)=>({x:q[0], y:q[1], v:q[2], t:i}));
+    w.repairs = lastS.r.map(q=>({x:q[0], y:q[1]}));
+  }
+
+  function restart(){ if(srv){ toMenu(); return; } w = makeWorld((Math.random()*1e9)|0); overT = 0; setScore(0); }
   setScore(0);
   raf = requestAnimationFrame(frame);
 
   return {
     stop(){
       stopped = true; cancelAnimationFrame(raf); ro.disconnect();
+      if(net && net.ws) try{ net.ws.close(); }catch(e){}
       window.removeEventListener("keydown", onKey); window.removeEventListener("keyup", onKey);
       cv.remove(); if(hint) hint.remove();
     },
