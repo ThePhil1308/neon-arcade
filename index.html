@@ -5904,7 +5904,9 @@ function start(ctx){
         }
       }).catch(()=>{ msg.textContent = "Server nicht erreichbar. Versuche es später noch einmal oder spiele Solo."; list.style.display = "none"; });
     }, "width:220px");
-    menu.append(h, name, solo, on, msg, list, info);
+    const ver = css(document.createElement("div"), "color:#4a5280;font-size:11px");
+    ver.textContent = "Version 2 · 02.10.2026 · Doppelstick, Klassen, Upgrades";
+    menu.append(h, name, solo, on, msg, list, info, ver);
     stage.appendChild(menu);
   }
   showMenu();
