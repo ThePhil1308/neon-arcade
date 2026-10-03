@@ -5194,8 +5194,9 @@ NeonArcade.register({
 const CFG = {
   world: 6400,          // Kantenlänge der Welt
   bots: 14,             // Gegner-Hubschrauber (Solo)
-  orbs: 220, repairs: 28, drones: 70, tanks: 20,
-  r: 20,                // Trefferradius (mal Klassengröße)
+  orbs: 0, repairs: 28, drones: 70, tanks: 20, blds: 450, bldRespawn: 25,   // Gebäude (Fässer, Scheiben, Kisten, Blöcke) stehen herum und geben beim Abschießen Erfahrung
+  r: 30,                // Trefferradius (mal Klassengröße)
+  bulletHit: 1.5,       // Geschosse treffen großzügiger als sie aussehen
   maxLvl: 49, tier2: 10, tier3: 20, modLvl: 30, modUpLvl: 40,   // Stufe 49 = alle 8 Werte voll (8 x 6 = 48 Punkte)
   bulletSpeed: 720, bulletLife: 0.85,
   killXp: 60, killXpShare: 0.35,
@@ -5244,6 +5245,13 @@ const CLASSES = {
             next:[], range:170, ab:"shield", abCd:20, abT:3, abN:"Schutzschild", d:"Fast unzerstörbar; Fähigkeit: Schild."},
 };
 const CLASS_IDS = Object.keys(CLASSES);
+/* Gebäude zum Abschießen: Fass (braun, rund), Scheibe (silber, rund), Kiste (braun, eckig), Block (hell, eckig) */
+const BLD = [
+  {k:"fass",    hp:45,  xp:14, r:30},
+  {k:"scheibe", hp:70,  xp:22, r:33},
+  {k:"kiste",   hp:100, xp:30, r:34},
+  {k:"block",   hp:160, xp:48, r:42},
+];
 /* Spezial-Module: ab Stufe 30 wählbar, eigene Taste (Q) und eigene Abklingzeit; ab Stufe 40 größer und schneller bereit */
 const MODULES = {
   bomb: {n:"Bombenteppich", cd:22, d:"Wirft 6 Bomben in Flugrichtung."},
@@ -5285,7 +5293,7 @@ function makeHeli(w, name, color, isPlayer){
   return h;
 }
 function makeWorld(seed, opts){
-  const w = {t:0, rand: rng(seed||1), nextId: 1, bullets: [], orbs: [], repairs: [], npcs: [], bombs: [], fogs: [], mines: [], heli: [], ev: [], over: false, kills: 0, pops: [], online: !!(opts&&opts.online), player: null};
+  const w = {t:0, rand: rng(seed||1), nextId: 1, bullets: [], orbs: [], repairs: [], npcs: [], bld: [], bombs: [], fogs: [], mines: [], heli: [], ev: [], over: false, kills: 0, pops: [], online: !!(opts&&opts.online), player: null};
   if(!w.online){
     w.player = makeHeli(w, "Du", CFG.playerColor, true);
     w.player.x = w.player.y = CFG.world/2;
@@ -5296,12 +5304,17 @@ function makeWorld(seed, opts){
   for(let i=0;i<CFG.repairs;i++) w.repairs.push(newOrb(w));
   for(let i=0;i<CFG.drones;i++) w.npcs.push(newNpc(w, "drone"));
   for(let i=0;i<CFG.tanks;i++) w.npcs.push(newNpc(w, "tank"));
+  for(let i=0;i<CFG.blds;i++) w.bld.push(newBld(w));
   return w;
+}
+function newBld(w){
+  const W = CFG.world, q = w.rand(), t = q < .4 ? 0 : q < .65 ? 1 : q < .87 ? 2 : 3;
+  return {id: w.nextId++, t, x: 150+w.rand()*(W-300), y: 150+w.rand()*(W-300), hp: BLD[t].hp, maxhp: BLD[t].hp, r: BLD[t].r, dead: false, respawn: 0};
 }
 function newNpc(w, kind){
   const W = CFG.world, R = w.rand, t = kind==="tank";
   return {id: w.nextId++, kind, x: 200+R()*(W-400), y: 200+R()*(W-400), vx:0, vy:0, ang: R()*6.28,
-    hp: t?170:28, maxhp: t?170:28, r: t?33:22, xp: t?95:22, cd: 1+R()*2, wx:0, wy:0, wt:0, dead:false, respawn:0};
+    hp: t?170:28, maxhp: t?170:28, r: t?44:30, xp: t?95:22, cd: 1+R()*2, wx:0, wy:0, wt:0, dead:false, respawn:0};
 }
 function addBot(w){
   const used = new Set(w.heli.map(h=>h.name));
@@ -5458,6 +5471,11 @@ function explode(w, x, y, r, dmg, ownerId, color){
     const d = Math.hypot(n.x-x, n.y-y);
     if(d < r + n.r) hurtNpc(w, n, dmg*(1 - d/(r+n.r)*.5), ownerId);
   }
+  for(const b of w.bld){
+    if(b.dead || ownerId<0) continue;
+    const d = Math.hypot(b.x-x, b.y-y);
+    if(d < r + b.r) hurtBld(w, b, dmg*(1 - d/(r+b.r)*.5), ownerId);
+  }
 }
 function hurt(w, h, dmg, ownerId){
   if(h.dead || h.shield > 0) return;
@@ -5473,17 +5491,20 @@ function hurtNpc(w, n, dmg, ownerId){
     w.ev.push([1, Math.round(n.x), Math.round(n.y), n.kind==="tank" ? "#ff9e4a" : "#c9d1ff"]);
     const o = w.heli.find(q=>q.id===ownerId);
     if(o && !o.dead){ addXp(w, o, n.xp); }
-    const k = n.kind==="tank" ? 5 : 2;
-    for(let i=0;i<k;i++){ const a = w.rand()*6.28, d = 8+w.rand()*34; w.orbs.push(newOrb(w, n.x+Math.cos(a)*d, n.y+Math.sin(a)*d, n.kind==="tank" ? 20 : 12)); }
+  }
+}
+function hurtBld(w, b, dmg, ownerId){
+  if(b.dead) return;
+  b.hp -= dmg;
+  if(b.hp <= 0){
+    b.dead = true; b.respawn = CFG.bldRespawn;
+    w.ev.push([1, Math.round(b.x), Math.round(b.y), b.t < 2 ? "#a8947c" : "#d6d8dc"]);
+    const o = w.heli.find(q=>q.id===ownerId);
+    if(o && !o.dead) addXp(w, o, BLD[b.t].xp);
   }
 }
 function kill(w, victim, killer){
   victim.dead = true; victim.respawn = victim.human ? CFG.respawnHuman : CFG.respawnBot; victim.deaths = (victim.deaths||0)+1;
-  const drop = Math.min(12, 4 + Math.floor(victim.lvl/3)), val = clamp(victim.score*.25/drop, 8, 90);
-  for(let i=0;i<drop;i++){
-    const a = w.rand()*6.28, d = 10+w.rand()*50;
-    w.orbs.push(newOrb(w, victim.x+Math.cos(a)*d, victim.y+Math.sin(a)*d, val));
-  }
   w.ev.push([1, Math.round(victim.x), Math.round(victim.y), victim.color]);
   w.ev.push([2, killer ? killer.name : "Panzer", victim.name]);
   if(killer && killer !== victim){
@@ -5507,11 +5528,16 @@ function botThink(w, b, dt){
   }
   let farm = null;
   if(!tx){
-    let nb = 520;
+    let nb = 650;
     for(const n of w.npcs){
       if(n.dead || (n.kind==="tank" && b.lvl < 8)) continue;
       const d = Math.hypot(n.x-b.x, n.y-b.y);
       if(d < nb){ nb = d; farm = n; }
+    }
+    for(const g of w.bld){
+      if(g.dead) continue;
+      const d = Math.hypot(g.x-b.x, g.y-b.y);
+      if(d < nb){ nb = d; farm = g; }
     }
   }
   const tgt = tx || farm;
@@ -5551,14 +5577,9 @@ function botThink(w, b, dt){
     }
   } else {
     b.lock = 0;
-    let o = null, od = 700;
-    for(const q of w.orbs){ const d=Math.hypot(q.x-b.x,q.y-b.y); if(d<od){od=d;o=q;} }
-    if(o){ mx = o.x-b.x; my = o.y-b.y; }
-    else {
-      b.wt -= dt;
-      if(b.wt<=0){ b.wt = 3+R()*4; b.wx = 200+R()*(W-400); b.wy = 200+R()*(W-400); }
-      mx = b.wx-b.x; my = b.wy-b.y;
-    }
+    b.wt -= dt;
+    if(b.wt<=0){ b.wt = 3+R()*4; b.wx = 200+R()*(W-400); b.wy = 200+R()*(W-400); }
+    mx = b.wx-b.x; my = b.wy-b.y;
   }
   const m = Math.hypot(mx,my) || 1;
   if(!tgt || weak) b.ang += clamp(angDiff(b.ang, Math.atan2(my,mx)), -dt*4, dt*4);
@@ -5593,7 +5614,7 @@ function step(w, input, dt){
     }
     if(w.over) continue;
     const ip = (byId ? byId[P.id] : input) || {x:0, y:0, aim:null, fire:false};
-    if(ip.aim != null) P.ang += clamp(angDiff(P.ang, ip.aim), -dt*14, dt*14);
+    if(ip.aim != null) P.ang += clamp(angDiff(P.ang, ip.aim), -dt*45, dt*45);   // Hubschrauber zeigt (fast) sofort dorthin, wohin gezielt wird
     moveHeli(P, ip.x, ip.y, dt);
     P.cd -= dt;
     if(ip.ab) useAbility(w, P);
@@ -5646,6 +5667,7 @@ function step(w, input, dt){
       }
     }
   }
+  for(const g of w.bld){ if(g.dead){ g.respawn -= dt; if(g.respawn <= 0){ const f = newBld(w); f.id = g.id; Object.assign(g, f); } } }
   // Bomben, Nebel, Minen
   for(let i=w.bombs.length-1;i>=0;i--){ const b = w.bombs[i]; b.t -= dt; if(b.t <= 0){ explode(w, b.x, b.y, b.r, b.dmg, b.owner, "#ff6b3d"); w.bombs.splice(i,1); } }
   for(let i=w.fogs.length-1;i>=0;i--){ w.fogs[i].t -= dt; if(w.fogs[i].t <= 0) w.fogs.splice(i,1); }
@@ -5653,7 +5675,7 @@ function step(w, input, dt){
   for(let i=w.mines.length-1;i>=0;i--){
     const m = w.mines[i]; m.life -= dt; if(m.arm > 0) m.arm -= dt;
     let boom = m.life <= 0 ? -1 : 0;
-    if(m.arm <= 0 && !boom) for(const h of w.heli){ if(h.dead || h.id===m.owner) continue; if(Math.hypot(h.x-m.x, h.y-m.y) < 58){ boom = 1; break; } }
+    if(m.arm <= 0 && !boom) for(const h of w.heli){ if(h.dead || h.id===m.owner) continue; if(Math.hypot(h.x-m.x, h.y-m.y) < 80){ boom = 1; break; } }
     if(boom){ if(boom > 0) explode(w, m.x, m.y, m.r, m.dmg, m.owner, "#ffd43b"); w.mines.splice(i,1); }
   }
   // Schüsse
@@ -5663,13 +5685,18 @@ function step(w, input, dt){
     let gone = q.life<=0 || q.x<0 || q.y<0 || q.x>CFG.world || q.y>CFG.world, hit = false;
     if(!gone) for(const h of w.heli){
       if(h.dead || h.id===q.owner) continue;
-      const rr = CFG.r*h.c.size + q.r, dx = h.x-q.x, dy = h.y-q.y;
+      const rr = CFG.r*h.c.size + q.r*CFG.bulletHit, dx = h.x-q.x, dy = h.y-q.y;
       if(dx*dx+dy*dy < rr*rr){ hurt(w, h, q.dmg, q.owner); w.ev.push([4, Math.round(q.x), Math.round(q.y)]); gone = hit = true; break; }
     }
     if(!gone && q.owner > 0) for(const n of w.npcs){
       if(n.dead) continue;
-      const rr = n.r + q.r, dx = n.x-q.x, dy = n.y-q.y;
+      const rr = n.r + q.r*CFG.bulletHit, dx = n.x-q.x, dy = n.y-q.y;
       if(dx*dx+dy*dy < rr*rr){ hurtNpc(w, n, q.dmg, q.owner); w.ev.push([4, Math.round(q.x), Math.round(q.y)]); gone = hit = true; break; }
+    }
+    if(!gone && q.owner > 0) for(const g of w.bld){
+      if(g.dead) continue;
+      const rr = g.r + q.r*CFG.bulletHit, dx = g.x-q.x, dy = g.y-q.y;
+      if(dx*dx+dy*dy < rr*rr){ hurtBld(w, g, q.dmg, q.owner); w.ev.push([4, Math.round(q.x), Math.round(q.y)]); gone = hit = true; break; }
     }
     if(gone){
       if(q.aoe) explode(w, q.x, q.y, q.aoe, q.dmg*.8, q.owner, q.color);
@@ -5680,23 +5707,15 @@ function step(w, input, dt){
   for(const h of w.heli){
     if(h.dead) continue;
     const R0 = CFG.r*h.c.size;
-    for(let i=w.orbs.length-1;i>=0;i--){
-      const o = w.orbs[i];
-      const dx = o.x-h.x, dy = o.y-h.y, d2 = dx*dx+dy*dy;
-      if(d2 < 100*100){ const d = Math.sqrt(d2)||1; o.x -= dx/d*dt*280; o.y -= dy/d*dt*280; }
-      if(d2 < (R0+10)*(R0+10)){ addXp(w, h, o.v); w.orbs.splice(i,1); }
-    }
     for(let i=w.repairs.length-1;i>=0;i--){
       const o = w.repairs[i], dx=o.x-h.x, dy=o.y-h.y;
-      if(dx*dx+dy*dy < (R0+16)*(R0+16)){ h.hp = Math.min(h.c.maxHp, h.hp + h.c.maxHp*.4); w.repairs.splice(i,1); }
+      if(dx*dx+dy*dy < (R0+26)*(R0+26)){ h.hp = Math.min(h.c.maxHp, h.hp + h.c.maxHp*.4); w.repairs.splice(i,1); }
     }
   }
-  while(w.orbs.length < CFG.orbs) w.orbs.push(newOrb(w));
   while(w.repairs.length < CFG.repairs) w.repairs.push(newOrb(w));
-  if(w.orbs.length > CFG.orbs+120) w.orbs.splice(0, w.orbs.length-CFG.orbs-120);
 }
 const hpMax = h=>h.c.maxHp;
-const LOGIK = {MODULES, MOD_IDS, useModule, needChoice, CFG, CLASSES, CLASS_IDS, STATS, STAT_MAX, makeWorld, step, shoot, hpMax, balance, addXp, upgradeStat, chooseClass, useAbility, xpNeed, recalc, levelUp, makeHeli};
+const LOGIK = {BLD, MODULES, MOD_IDS, useModule, needChoice, CFG, CLASSES, CLASS_IDS, STATS, STAT_MAX, makeWorld, step, shoot, hpMax, balance, addXp, upgradeStat, chooseClass, useAbility, xpNeed, recalc, levelUp, makeHeli};
 
 /* ---------- Zeichnen (Optik wie ein io-Spiel: Rasen mit Gitter, blau = du, rot = Gegner) ---------- */
 const BLUE = "#2f4bff", RED = "#dc2b2b";
@@ -5834,36 +5853,39 @@ function drawGround(x, cx, cy, vw, vh){
   for(let gy=Math.floor(y0/100)*100; gy<=y1; gy+=100){ x.moveTo(x0,gy); x.lineTo(x1,gy); }
   x.stroke();
 }
-function drawOrb(x, o0, t){
-  x.save(); x.translate(o0.x, o0.y); x.scale(1.55, 1.55);
-  const o = {x:0, y:0, v:o0.v};
-  const v = o.v, sh = (r)=>{ x.fillStyle = "rgba(30,60,20,.28)"; x.beginPath(); x.arc(o.x+5, o.y+7, r, 0, 6.3); x.fill(); };
-  if(v < 14){          // braunes Fass
-    sh(15); x.fillStyle = "#9d8770"; x.beginPath(); x.arc(o.x, o.y, 15, 0, 6.3); x.fill();
-    x.fillStyle = "#b9a58e"; x.beginPath(); x.arc(o.x, o.y, 10.5, 0, 6.3); x.fill();
+function drawBld(x, g){
+  x.save(); x.translate(g.x, g.y); x.scale(1.55, 1.55);
+  const o = {x:0, y:0}, t = g.t, sh = (r)=>{ x.fillStyle = "rgba(30,60,20,.28)"; x.beginPath(); x.arc(o.x+5, o.y+7, r, 0, 6.3); x.fill(); };
+  if(t === 0){          // braunes Fass (rund)
+    sh(15); x.fillStyle = "#9d8770"; x.beginPath(); x.arc(0, 0, 15, 0, 6.3); x.fill();
+    x.fillStyle = "#b9a58e"; x.beginPath(); x.arc(0, 0, 10.5, 0, 6.3); x.fill();
     x.strokeStyle = "#8a7660"; x.lineWidth = 2; x.stroke();
-    x.fillStyle = "#a08c75"; x.beginPath(); x.arc(o.x, o.y, 5, 0, 6.3); x.fill();
-  } else if(v < 20){   // silberne Scheibe
-    sh(17); x.fillStyle = "#c4c8cf"; x.beginPath(); x.arc(o.x, o.y, 17, 0, 6.3); x.fill();
-    x.fillStyle = "#f3f4f6"; x.beginPath(); x.arc(o.x, o.y, 10, 0, 6.3); x.fill();
+    x.fillStyle = "#a08c75"; x.beginPath(); x.arc(0, 0, 5, 0, 6.3); x.fill();
+  } else if(t === 1){   // silberne Scheibe (rund)
+    sh(17); x.fillStyle = "#c4c8cf"; x.beginPath(); x.arc(0, 0, 17, 0, 6.3); x.fill();
+    x.fillStyle = "#f3f4f6"; x.beginPath(); x.arc(0, 0, 10, 0, 6.3); x.fill();
     x.strokeStyle = "#aeb3bb"; x.lineWidth = 2; x.stroke();
-  } else if(v < 35){   // braune Kiste
-    x.fillStyle = "rgba(30,60,20,.28)"; x.fillRect(o.x-14, o.y-12, 32, 32);
-    x.fillStyle = "#b8a38a"; x.fillRect(o.x-16, o.y-16, 32, 32);
-    x.fillStyle = "#a28d74"; x.fillRect(o.x-10, o.y-10, 20, 20);
-    x.strokeStyle = "#c9b8a2"; x.lineWidth = 2; x.strokeRect(o.x-9, o.y-9, 18, 18);
-  } else {             // große helle Kiste
-    x.fillStyle = "rgba(30,60,20,.28)"; x.fillRect(o.x-16, o.y-14, 38, 38);
-    x.fillStyle = "#d9dadd"; x.fillRect(o.x-19, o.y-19, 38, 38);
-    x.fillStyle = "#eceef0"; x.fillRect(o.x-12, o.y-12, 24, 24);
-    x.strokeStyle = "#bfc2c7"; x.lineWidth = 2; x.strokeRect(o.x-12, o.y-12, 24, 24);
+  } else if(t === 2){   // braune Kiste (eckig)
+    x.fillStyle = "rgba(30,60,20,.28)"; x.fillRect(-14, -12, 32, 32);
+    x.fillStyle = "#b8a38a"; x.fillRect(-16, -16, 32, 32);
+    x.fillStyle = "#a28d74"; x.fillRect(-10, -10, 20, 20);
+    x.strokeStyle = "#c9b8a2"; x.lineWidth = 2; x.strokeRect(-9, -9, 18, 18);
+  } else {              // großer heller Block (eckig)
+    x.fillStyle = "rgba(30,60,20,.28)"; x.fillRect(-16, -14, 38, 38);
+    x.fillStyle = "#d9dadd"; x.fillRect(-19, -19, 38, 38);
+    x.fillStyle = "#eceef0"; x.fillRect(-12, -12, 24, 24);
+    x.strokeStyle = "#bfc2c7"; x.lineWidth = 2; x.strokeRect(-12, -12, 24, 24);
   }
   x.restore();
+  if(g.hp < g.maxhp){   // Lebensbalken, sobald beschädigt
+    const bw = 52; x.fillStyle = "rgba(25,25,25,.78)"; rrect(x, g.x-bw/2, g.y+(g.r||32)+8, bw, 7, 3.5); x.fill();
+    x.fillStyle = "#4cd964"; rrect(x, g.x-bw/2+1, g.y+(g.r||32)+9, Math.max(4, (bw-2)*clamp(g.hp/g.maxhp,0,1)), 5, 2.5); x.fill();
+  }
 }
 function drawWorld(x, w, rs, cx, cy, vw, vh, meId){
   drawGround(x, cx, cy, vw, vh);
   const vis = (px, py, m)=>px>cx-vw/2-m && px<cx+vw/2+m && py>cy-vh/2-m && py<cy+vh/2+m;
-  for(const o of w.orbs) if(vis(o.x, o.y, 30)) drawOrb(x, o, w.t);
+  for(const g of w.bld) if(!g.dead && vis(g.x, g.y, 60)) drawBld(x, g);
   for(const o of w.repairs){
     if(!vis(o.x, o.y, 30)) continue;
     x.fillStyle = "rgba(30,60,20,.28)"; rrect(x, o.x-14, o.y-11, 32, 32, 6); x.fill();
@@ -5924,7 +5946,7 @@ function thumb(cv){
   x.strokeStyle = "rgba(255,255,255,.45)"; x.lineWidth = 2;
   for(let i=0;i<W;i+=48){ x.beginPath(); x.moveTo(i,0); x.lineTo(i,H); x.stroke(); }
   for(let j=0;j<H;j+=48){ x.beginPath(); x.moveTo(0,j); x.lineTo(W,j); x.stroke(); }
-  drawOrb(x, {x:40,y:140,v:12}, 0); drawOrb(x, {x:250,y:40,v:16}, 0); drawOrb(x, {x:285,y:135,v:22}, 0); drawOrb(x, {x:150,y:30,v:40}, 0);
+  drawBld(x, {x:40,y:140,t:0,hp:1,maxhp:1}); drawBld(x, {x:250,y:40,t:1,hp:1,maxhp:1}); drawBld(x, {x:285,y:135,t:2,hp:1,maxhp:1}); drawBld(x, {x:150,y:30,t:3,hp:1,maxhp:1});
   drawNpc(x, {x:60,y:50,kind:0,ang:0,hp:28,maxhp:28,r:14}); drawNpc(x, {x:225,y:105,kind:1,ang:2.6,hp:170,maxhp:170,r:26});
   const fake = (px,py,ang,cls)=>({x:px,y:py,ang,cls,rotor:1.2+px*.01,hit:0,fl:0,hp:80,lvl:3,name:"",vx:0,vy:0,cloak:0,shield:0,od:0});
   drawHeli(x, fake(150,95,-.5,"sniper"), true, false);
@@ -5935,7 +5957,7 @@ function thumb(cv){
 // url: Cloudflare-Worker (copter-online/), ?copterserver=ws://127.0.0.1:8788 in der Seiten-Adresse überschreibt sie zum Testen
 const ONLINE = {
   url: "wss://neon-copter-online.neon-strike-online.workers.dev",
-  proto: 3,          // muss zu PROTOKOLL in copter-online/src/raum.js passen
+  proto: 4,          // muss zu PROTOKOLL in copter-online/src/raum.js passen
   interp: 120,       // ms Verzögerung beim Interpolieren
 };
 function serverUrl(){
@@ -6055,7 +6077,7 @@ function playGame({stage, setScore}, srv, toMenu){
   const cv = document.createElement("canvas");
   cv.style.cssText = "touch-action:none;display:block;border-radius:10px;background:#86bc4a;cursor:crosshair;-webkit-user-select:none;user-select:none";
   stage.appendChild(cv);
-  let touchMode = false; try{ touchMode = matchMedia("(pointer:coarse)").matches; }catch(e){}
+  let touchMode = false; try{ touchMode = matchMedia("(pointer:coarse)").matches && !matchMedia("(any-pointer:fine)").matches; }catch(e){}   // nur reine Touch-Geräte; sonst entscheidet das zuletzt benutzte Gerät
   const HINT_PC = "WASD fliegen · Maus zielen · Klick/Leertaste schießen · E Fähigkeit · Q Modul · 1–8 Werte verbessern";
   const HINT_TOUCH = "Links ziehen = fliegen · Rechts ziehen = zielen und schießen · Tippe auf + für Upgrades";
   const hint = typeof makeHint==="function" ? makeHint(touchMode ? HINT_TOUCH : HINT_PC) : null;
@@ -6067,7 +6089,7 @@ function playGame({stage, setScore}, srv, toMenu){
   let W = 0, H = 0, dpr = 1, raf = 0, last = 0, stopped = false, overT = 0, playT = 0;
   const keys = {}; let mouse = null, mdown = false, abKey = false, ab2Key = false;
   const fingers = new Map();
-  const cam = {x:0, y:0, zm:1, init:false}; let view = {sc:1};
+  const cam = {x:0, y:0, zm:1, init:false}; let view = {sc:1, cx:0, cy:0};
   let ui = {rows:[], ab:null, ab2:null, cards:[], lb:null}, lbOpen = true, fps = 60;
 
   function fit(){
@@ -6104,6 +6126,7 @@ function playGame({stage, setScore}, srv, toMenu){
   const onDown = e=>{
     const p = pos(e);
     if(e.pointerType !== "mouse" && !touchMode){ touchMode = true; if(hint) hint.textContent = HINT_TOUCH; }
+    else if(e.pointerType === "mouse" && touchMode && !fingers.size){ touchMode = false; if(hint) hint.textContent = HINT_PC; }
     if(net && net.status!=="ok" && net.status!=="verbinden"){ toMenu(); return; }
     if(w.over){ if(overT > .6) restart(); return; }
     e.preventDefault();
@@ -6111,6 +6134,7 @@ function playGame({stage, setScore}, srv, toMenu){
     if(e.pointerType === "mouse"){
       mouse = p;
       if(e.button === 2) abKey = true; else mdown = true;
+      try{ cv.setPointerCapture(e.pointerId); }catch(_){}   // Zielen und Schießen laufen weiter, auch wenn die Maus das Feld verlässt
     } else {
       const role = p.x < W/2 ? "move" : "aim";
       for(const f of fingers.values()) if(f.role === role) return;
@@ -6119,10 +6143,12 @@ function playGame({stage, setScore}, srv, toMenu){
     }
   };
   const onMove = e=>{
-    if(e.pointerType === "mouse") mouse = pos(e);
+    if(e.pointerType === "mouse"){ mouse = pos(e); if(touchMode && !fingers.size){ touchMode = false; if(hint) hint.textContent = HINT_PC; } }
     else { const f = fingers.get(e.pointerId); if(f){ const p = pos(e); f.x = p.x; f.y = p.y; } }
   };
   const onUp = e=>{ if(e.pointerType === "mouse") mdown = false; else fingers.delete(e.pointerId); };
+  const onWinUp = e=>{ if(e.pointerType === "mouse") mdown = false; };
+  const onBlur = ()=>{ mdown = false; fingers.clear(); for(const k in keys) keys[k] = false; };
   const onKey = e=>{
     const k = e.key.toLowerCase(), down = e.type === "keydown";
     if(["arrowup","arrowdown","arrowleft","arrowright"," "].includes(k)) e.preventDefault();
@@ -6141,6 +6167,7 @@ function playGame({stage, setScore}, srv, toMenu){
   cv.addEventListener("pointerup", onUp); cv.addEventListener("pointercancel", onUp);
   cv.addEventListener("contextmenu", e=>e.preventDefault());
   window.addEventListener("keydown", onKey); window.addEventListener("keyup", onKey);
+  window.addEventListener("pointerup", onWinUp); window.addEventListener("blur", onBlur);
 
   function readInput(){
     const P = w.player;
@@ -6155,7 +6182,7 @@ function playGame({stage, setScore}, srv, toMenu){
     }
     if(kx || ky){ inp.x = kx; inp.y = ky; }
     if(mouse && !touchMode && !fingers.size){
-      const sx = W/2 + (P.x-cam.x)*view.sc, sy = H/2 + (P.y-cam.y)*view.sc;
+      const sx = W/2 + (P.x-view.cx)*view.sc, sy = H/2 + (P.y-view.cy)*view.sc;   // dieselbe Kamera wie beim Zeichnen
       inp.aim = Math.atan2(mouse.y-sy, mouse.x-sx); aimed = true;
       inp.fire = mdown;
     }
@@ -6200,7 +6227,7 @@ function playGame({stage, setScore}, srv, toMenu){
   }
 
   /* ---- Online: Schnappschüsse vom Server in eine zeichenbare Welt verwandeln ---- */
-  function makeNetWorld(){ return {t:0, heli:[], bullets:[], orbs:[], repairs:[], npcs:[], bombs:[], fogs:[], mines:[], pops:[], over:false, online:true, kills:0, player:null}; }
+  function makeNetWorld(){ return {t:0, heli:[], bullets:[], orbs:[], bld:[], repairs:[], npcs:[], bombs:[], fogs:[], mines:[], pops:[], over:false, online:true, kills:0, player:null}; }
   let sendT = 0; const objs = new Map(), nobjs = new Map();
   if(srv){
     net = {ws:null, me:null, snaps:[], roster:new Map(), status:"verbinden", mine:{pts:0, st:[0,0,0,0,0,0,0,0], choice:0, cd2:0, cdMax:1, mod:null, cd3:0, cdMax3:1}};
@@ -6260,7 +6287,7 @@ function playGame({stage, setScore}, srv, toMenu){
     }
     w.npcs = nl;
     w.bullets = lastS.b.map(q=>({x:q[0]+q[2]*age, y:q[1]+q[3]*age, vx:q[2], vy:q[3], r:q[5], aoe:q[6], owner:q[4]}));
-    w.orbs = lastS.o.map((q,i)=>({x:q[0], y:q[1], v:q[2], t:i}));
+    w.bld = lastS.bd.map(q=>({id:q[0], t:q[1], x:q[2], y:q[3], hp:q[4], maxhp:BLD[q[1]].hp, r:BLD[q[1]].r}));
     w.repairs = lastS.r.map(q=>({x:q[0], y:q[1]}));
     w.bombs = (lastS.bm||[]).map(q=>({x:q[0], y:q[1], r:q[2], t:q[3]}));
     w.fogs = (lastS.g||[]).map(q=>({x:q[0], y:q[1], r:q[2], t:q[3]}));
@@ -6304,6 +6331,7 @@ function playGame({stage, setScore}, srv, toMenu){
     if(!P.dead || !net){ const f = 1-Math.exp(-14*dt); cam.x += (P.x-cam.x)*f; cam.y += (P.y-cam.y)*f; }
     const vw = W/sc, vh = H/sc;
     const cx = clamp(cam.x, vw/2-120, CFG.world-vw/2+120), cy = clamp(cam.y, vh/2-120, CFG.world-vh/2+120);
+    view.cx = cx; view.cy = cy;
     x.fillStyle = "#05070f"; x.fillRect(0,0,W,H);
     x.save();
     const sh = rs.shake;
@@ -6536,6 +6564,7 @@ function playGame({stage, setScore}, srv, toMenu){
     stop(){
       stopped = true; cancelAnimationFrame(raf); ro.disconnect();
       window.removeEventListener("keydown", onKey); window.removeEventListener("keyup", onKey);
+      window.removeEventListener("pointerup", onWinUp); window.removeEventListener("blur", onBlur);
       if(net && net.ws) try{ net.ws.close(); }catch(e){}
       cv.remove(); if(hint) hint.remove();
     },
